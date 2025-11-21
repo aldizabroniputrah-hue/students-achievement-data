@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal Admin Prestasi V2.0</title>
+    <!-- Memuat Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Memuat Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Menggunakan font Inter */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Warna latar belakang gelap */
+            color: #c9d1d9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .card {
+            background-color: #161b22; /* Warna card lebih terang */
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        .btn-primary {
+            background-color: #2185d0;
+            color: white;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .btn-primary:hover {
+            background-color: #1a6fb2;
+            transform: translateY(-1px);
+        }
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+        /* Style untuk logo placeholder */
+        .logo-placeholder {
+            width: 80px;
+            height: 80px;
+            background-color: #2185d0;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-weight: bold;
+            font-size: 14px;
+            border-radius: 50%;
+            margin: 0 auto 2rem;
+            box-shadow: 0 0 0 5px rgba(33, 133, 208, 0.3);
+        }
+        /* Style untuk Modal Konfirmasi */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        /* Animasi Spinner */
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="w-full max-w-4xl p-8 rounded-xl card transition-all duration-300">
+        <!-- Konten aplikasi akan dirender di sini -->
+        <div class="text-center">
+            <p>Memuat aplikasi...</p>
+        </div>
+    </div>
+    
+    <!-- Area untuk Modal (akan diisi oleh JS) -->
+    <div id="modal-container"></div>
+
+    <!-- Firebase SDK (ES Module Imports) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, doc, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, setDoc
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Deklarasi Global Variables (Sesuai Kebutuhan Canvas) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let firebaseConfig = null;
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config ? JSON.parse(__firebase_config) : null;
+        } catch(e) {
+            console.error("Gagal parsing __firebase_config:", e);
+        }
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // --- Variabel State Aplikasi ---
+        let db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        let isAuthenticated = false; // Status login demo
+        let usernameInput = '';
+        let passwordInput = '';
+        let loginError = '';
+        let achievements = [];
+        let newAchievement = { name: '', date: '', description: '' };
+        let editingAchievementId = null; // ID prestasi yang sedang di-edit
+        let filterText = ''; // Teks untuk pencarian/filter
+        let formError = ''; // Pesan error untuk form tambah/edit
+        
+        let appContainer = document.getElementById('app');
+        let modalContainer = document.getElementById('modal-container');
+        
+        // Kredensial Demo (Hanya untuk Uji Coba)
+        const DEMO_USERNAME = 'superadmin';
+        const DEMO_PASSWORD = 'admin123';
+        
+        // Deklarasi icons di scope module, akan diinisialisasi di setupFirebase
+        let icons = {}; 
+        
+        // --- Fungsi Helper Ikon Lucide ---
+        function createIconWrapper(IconFunction) {
+            if (typeof IconFunction === 'function') {
+                return {
+                    toSvg: (attributes) => {
+                        const result = IconFunction(attributes);
+                        if (result && typeof result.toSvg === 'function') {
+                            return result.toSvg();
+                        }
+                        return '';
+                    }
+                };
+            }
+            return { toSvg: () => '' };
+        }
+        
+        // --- Fungsi Utility ---
+        function render() {
+            // Fungsi utama untuk me-render UI berdasarkan state
+            if (!isAuthReady) {
+                renderLoading();
+                return;
+            }
+
+            if (!isAuthenticated) {
+                renderLogin();
+            } else {
+                renderAdminDashboard();
+            }
+        }
+
+        // Fungsi untuk mereset form state setelah tambah/edit
+        function resetFormState() {
+            newAchievement = { name: '', date: '', description: '' };
+            editingAchievementId = null;
+            formError = '';
+            render();
+        }
+        
+        // --- Render Loading Screen ---
+        function renderLoading() {
+            appContainer.innerHTML = `
+                <div class="text-center py-12">
+                    ${icons.loader.toSvg({ class: 'w-10 h-10 mx-auto text-blue-500 spinner' })}
+                    <p class="mt-4 text-lg text-gray-400">Menghubungkan ke sistem...</p>
+                </div>
+            `;
+        }
+
+        // --- Render Modal Konfirmasi ---
+        function showConfirmModal(title, message, onConfirm) {
+            modalContainer.innerHTML = `
+                <div class="modal-overlay">
+                    <div class="card p-6 rounded-xl w-full max-w-sm">
+                        <h3 class="text-xl font-bold mb-3 text-red-400">${title}</h3>
+                        <p class="text-gray-300 mb-6">${message}</p>
+                        <div class="flex justify-end space-x-3">
+                            <button id="cancel-modal" class="px-4 py-2 rounded-lg bg-gray-600 hover:bg-gray-700 transition text-white font-medium">Batal</button>
+                            <button id="confirm-modal" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 transition text-white font-medium">Hapus</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('cancel-modal').onclick = () => modalContainer.innerHTML = '';
+            document.getElementById('confirm-modal').onclick = () => {
+                onConfirm();
+                modalContainer.innerHTML = '';
+            };
+        }
+
+
+        // --- Render Login Screen ---
+        function renderLogin() {
+            appContainer.innerHTML = `
+                <div class="w-full max-w-lg mx-auto">
+                    <div class="logo-placeholder">
+                        ${icons.trophy.toSvg({ class: 'w-8 h-8' })}
+                    </div>
+                    <h1 class="text-3xl font-bold text-white text-center mb-1">Masuk ke Portal Admin</h1>
+                    <p class="text-sm text-gray-400 text-center mb-8">Sistem Manajemen Prestasi</p>
+
+                    ${loginError ? `<div class="bg-red-900/50 text-red-300 p-3 rounded-lg mb-4 text-sm">${loginError}</div>` : ''}
+
+                    <form id="login-form" class="mt-8">
+                        <div class="mb-4">
+                            <label for="username" class="block text-sm font-medium mb-1 flex items-center">${icons.user.toSvg({ class: 'w-4 h-4 mr-2 text-blue-400' })} Username</label>
+                            <input type="text" id="username" value="${usernameInput}" class="w-full px-3 py-2 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" placeholder="superadmin" required>
+                        </div>
+                        <div class="mb-6">
+                            <label for="password" class="block text-sm font-medium mb-1 flex items-center">${icons.lock.toSvg({ class: 'w-4 h-4 mr-2 text-blue-400' })} Password</label>
+                            <input type="password" id="password" value="${passwordInput}" class="w-full px-3 py-2 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" placeholder="admin123" required>
+                        </div>
+                        <button type="submit" class="w-full btn-primary py-2.5 rounded-lg font-semibold flex items-center justify-center shadow-lg shadow-blue-500/30">
+                            ${icons.logIn.toSvg({ class: 'w-5 h-5 mr-2' })} Masuk ke Dashboard
+                        </button>
+                    </form>
+                </div>
+            `;
+
+            // Tambahkan event listener untuk form login
+            document.getElementById('login-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                usernameInput = document.getElementById('username').value;
+                passwordInput = document.getElementById('password').value;
+                handleLogin();
+            });
+        }
+
+        // --- Handler Login Demo ---
+        function handleLogin() {
+            if (usernameInput === DEMO_USERNAME && passwordInput === DEMO_PASSWORD) {
+                isAuthenticated = true;
+                loginError = '';
+            } else {
+                loginError = 'Username atau Password salah. Silakan coba: superadmin / admin123';
+            }
+            render();
+        }
+
+        // --- Handler Logout (Tombol Kembali) ---
+        function handleLogout() {
+            // Ini berfungsi sebagai "tombol kembali" dari Dashboard ke Halaman Login
+            isAuthenticated = false;
+            loginError = '';
+            render();
+        }
+
+        // --- Handler Edit Start ---
+        function handleEditStart(id) {
+            const achievementToEdit = achievements.find(a => a.id === id);
+            if (achievementToEdit) {
+                editingAchievementId = id;
+                // Clone data agar perubahan di form tidak langsung mempengaruhi array
+                newAchievement = { ...achievementToEdit };
+                formError = ''; // Reset error
+                render();
+                // Scroll ke form
+                document.getElementById('achievement-form-card')?.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        // --- Handler Cancel Edit ---
+        function handleCancelEdit() {
+            resetFormState();
+        }
+
+
+        // --- Render Bagian Formulir Prestasi (Refactored) ---
+        function renderAchievementForm() {
+            const isEditing = editingAchievementId !== null;
+            const title = isEditing ? 'Ubah Detail Prestasi' : 'Tambah Prestasi Baru';
+            const icon = isEditing ? icons.edit3 : icons.plusSquare;
+            const buttonText = isEditing ? 'Simpan Perubahan' : 'Simpan Prestasi';
+            const buttonClass = isEditing ? 'bg-green-600 hover:bg-green-700 shadow-green-500/30' : 'btn-primary shadow-blue-500/30';
+            const formBorder = isEditing ? 'border-green-600/50' : 'border-blue-600/50';
+
+            // Mengambil input values dari state newAchievement
+            const { name, date, description } = newAchievement;
+
+            return `
+                <!-- Formulir Tambah/Edit Prestasi -->
+                <div id="achievement-form-card" class="card p-6 mb-8 rounded-xl border ${formBorder} transition-all duration-300">
+                    <h2 class="text-xl font-semibold mb-4 ${isEditing ? 'text-green-400' : 'text-blue-400'} flex items-center">
+                        ${icon.toSvg({ class: 'w-5 h-5 mr-2' })} ${title}
+                    </h2>
+
+                    ${formError ? `<div class="bg-red-900/50 text-red-300 p-3 rounded-lg mb-4 text-sm flex items-center">
+                        ${icons.alertTriangle.toSvg({ class: 'w-4 h-4 mr-2' })}
+                        ${formError}
+                    </div>` : ''}
+
+                    <form id="save-achievement-form">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label for="name" class="block text-sm font-medium mb-1">Nama Prestasi <span class="text-red-500">*</span></label>
+                                <input type="text" id="name" value="${name}" class="w-full px-3 py-2 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" placeholder="Cth: Juara 1 Lomba Sains" required>
+                            </div>
+                            <div>
+                                <label for="date" class="block text-sm font-medium mb-1">Tanggal <span class="text-red-500">*</span></label>
+                                <input type="date" id="date" value="${date}" class="w-full px-3 py-2 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" required>
+                            </div>
+                        </div>
+                        <div class="mt-4">
+                            <label for="description" class="block text-sm font-medium mb-1">Deskripsi</label>
+                            <textarea id="description" class="w-full px-3 py-2 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" rows="2" placeholder="Detail kegiatan atau penyelenggara...">${description}</textarea>
+                        </div>
+                        
+                        <div class="mt-4 flex space-x-3">
+                            <button type="submit" class="py-2 px-4 rounded-lg font-semibold flex items-center transition ${buttonClass}">
+                                ${icons.save.toSvg({ class: 'w-5 h-5 mr-2' })} ${buttonText}
+                            </button>
+                            ${isEditing ? `
+                                <button type="button" onclick="window.app.handleCancelEdit()" class="py-2 px-4 rounded-lg font-semibold flex items-center bg-gray-600 hover:bg-gray-700 transition">
+                                    ${icons.x.toSvg({ class: 'w-5 h-5 mr-2' })} Batal Edit
+                                </button>
+                            ` : ''}
+                        </div>
+                    </form>
+                </div>
+            `;
+        }
+
+        // --- Render Bagian Daftar Prestasi (Refactored) ---
+        function renderAchievementList() {
+            const filteredAchievements = achievements.filter(a => {
+                const search = filterText.toLowerCase();
+                return a.name.toLowerCase().includes(search) || 
+                       a.date.includes(search) || 
+                       a.description.toLowerCase().includes(search);
+            });
+
+            const achievementListItems = filteredAchievements.length > 0
+                ? filteredAchievements.map(a => `
+                    <div class="p-4 border border-gray-700 ${editingAchievementId === a.id ? 'bg-green-900/40 border-green-500' : 'bg-gray-800/50'} flex justify-between items-start rounded-lg mb-3 shadow-md hover:bg-gray-800 transition duration-150">
+                        <div class="flex items-start space-x-4 flex-grow">
+                            ${icons.award.toSvg({ class: 'w-6 h-6 text-yellow-400 flex-shrink-0 mt-1' })}
+                            <div class="flex-grow">
+                                <p class="font-semibold text-lg text-white">${a.name}</p>
+                                <p class="text-sm text-blue-300 mb-1 flex items-center">
+                                    ${icons.calendar.toSvg({ class: 'w-4 h-4 mr-1' })} ${a.date}
+                                </p>
+                                <p class="text-sm text-gray-400 mt-2">${a.description}</p>
+                                <span class="inline-flex items-center mt-3 text-xs font-medium bg-gray-700 text-gray-300 px-2 py-0.5 rounded-full">
+                                    Admin: ${a.userId.substring(0, 8)}...
+                                </span>
+                                ${editingAchievementId === a.id ? `
+                                    <span class="inline-flex items-center mt-3 ml-2 text-xs font-medium bg-green-600 text-white px-2 py-0.5 rounded-full animate-pulse">
+                                        SEDANG DIEDIT
+                                    </span>
+                                ` : ''}
+                            </div>
+                        </div>
+                        <div class="flex space-x-2 flex-shrink-0 ml-4">
+                            <button onclick="window.app.handleEditStart('${a.id}')" class="text-blue-400 hover:text-blue-300 transition p-2 rounded-full hover:bg-blue-900/30" title="Ubah Prestasi">
+                                ${icons.edit3.toSvg({ class: 'w-5 h-5' })}
+                            </button>
+                            <button onclick="window.app.handleDeleteAchievement('${a.id}', '${a.name}')" class="text-red-400 hover:text-red-300 transition p-2 rounded-full hover:bg-red-900/30" title="Hapus Prestasi">
+                                ${icons.trash2.toSvg({ class: 'w-5 h-5' })}
+                            </button>
+                        </div>
+                    </div>
+                `).join('')
+                : `
+                    <div class="text-center bg-gray-800/30 p-10 rounded-lg">
+                        ${icons.clipboardX.toSvg({ class: 'w-10 h-10 mx-auto mb-3 text-gray-500' })}
+                        <p class="text-gray-500 text-lg font-medium">Data tidak ditemukan.</p>
+                        ${filterText ? `<p class="text-sm text-gray-600">Coba ubah kata kunci pencarian Anda.</p>` : ''}
+                    </div>
+                `;
+
+            return `
+                <!-- Daftar Prestasi & Pencarian -->
+                <div class="card p-6 rounded-xl border border-gray-700">
+                    <h2 class="text-xl font-semibold mb-4 text-blue-400 flex items-center border-b border-gray-700 pb-2">
+                        ${icons.listTodo.toSvg({ class: 'w-5 h-5 mr-2' })} Daftar Semua Prestasi (${achievements.length} Total)
+                    </h2>
+
+                    <!-- Filter / Search Input -->
+                    <div class="mb-6 relative">
+                        ${icons.search.toSvg({ class: 'w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500' })}
+                        <input type="text" id="filter-input" value="${filterText}" 
+                                class="w-full px-10 py-2.5 bg-[#0d1117] border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white placeholder-gray-500" 
+                                placeholder="Cari Prestasi (Nama, Tanggal, Deskripsi...)">
+                    </div>
+                    
+                    <div id="achievement-list" class="space-y-3">
+                        ${achievementListItems}
+                    </div>
+                </div>
+            `;
+        }
+
+
+        // --- Render Admin Dashboard (Utama) ---
+        function renderAdminDashboard() {
+            appContainer.innerHTML = `
+                <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4 sticky top-0 bg-[#0d1117] z-10">
+                    <h1 class="text-3xl font-bold text-white flex items-center">
+                        ${icons.layoutDashboard.toSvg({ class: 'w-7 h-7 mr-3 text-blue-400' })} Dashboard Admin
+                    </h1>
+                    <button onclick="window.app.handleLogout()" class="text-red-400 hover:text-white transition flex items-center bg-gray-800 p-2 rounded-lg font-medium hover:bg-red-700 shadow-md">
+                        ${icons.logOut.toSvg({ class: 'w-5 h-5 mr-1' })} Keluar / Kembali
+                    </button>
+                </div>
+
+                <div class="mb-8 p-3 rounded-lg bg-gray-800/50 border border-gray-700">
+                    <p class="text-sm text-gray-400 flex items-center">
+                        ${icons.userCheck.toSvg({ class: 'w-4 h-4 mr-2 text-green-400' })} 
+                        Anda masuk sebagai Super Admin (ID: <span class="font-mono text-xs ml-1 text-yellow-400">${userId}</span>)
+                    </p>
+                </div>
+
+                ${renderAchievementForm()}
+                
+                ${renderAchievementList()}
+            `;
+            
+            // Tambahkan event listener untuk formulir tambah/edit prestasi
+            document.getElementById('save-achievement-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                // Ambil nilai dari DOM dan update state sementara
+                newAchievement.name = document.getElementById('name').value.trim();
+                newAchievement.date = document.getElementById('date').value;
+                newAchievement.description = document.getElementById('description').value.trim();
+                
+                // Panggil handler utama
+                if (editingAchievementId) {
+                    window.app.handleUpdateAchievement();
+                } else {
+                    window.app.handleAddAchievement();
+                }
+            });
+
+            // Tambahkan event listener untuk input filter
+            document.getElementById('filter-input').addEventListener('input', (e) => {
+                filterText = e.target.value;
+                render(); // Re-render untuk menerapkan filter
+            });
+        }
+
+        // --- Handler Firestore: Tambah Prestasi (CREATE) ---
+        async function handleAddAchievement() {
+            if (!db || !userId) return console.error("Firestore belum siap atau user ID tidak ada.");
+            
+            if (!newAchievement.name || !newAchievement.date) {
+                formError = "Nama Prestasi dan Tanggal wajib diisi!";
+                render();
+                return;
+            }
+
+            try {
+                const achievementsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'achievements');
+                
+                const achievementData = {
+                    name: newAchievement.name,
+                    date: newAchievement.date,
+                    description: newAchievement.description,
+                    userId: userId, 
+                    createdAt: new Date().toISOString()
+                };
+
+                await addDoc(achievementsCollectionRef, achievementData);
+                
+                // Sukses: Reset form
+                resetFormState();
+
+            } catch (e) {
+                console.error("Error menambahkan prestasi: ", e);
+                formError = `Gagal menyimpan: ${e.message || 'Kesalahan Server'}`;
+                render();
+            }
+        }
+
+        // --- Handler Firestore: Update Prestasi (UPDATE) ---
+        async function handleUpdateAchievement() {
+            if (!db || !userId || !editingAchievementId) return console.error("Firestore atau ID Edit tidak siap.");
+
+            if (!newAchievement.name || !newAchievement.date) {
+                formError = "Nama Prestasi dan Tanggal wajib diisi!";
+                render();
+                return;
+            }
+
+            try {
+                // Path publik: /artifacts/{appId}/public/data/achievements/{id}
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'achievements', editingAchievementId);
+                
+                // Data yang diupdate (gunakan setDoc dengan merge: true atau updateDoc)
+                const updateData = {
+                    name: newAchievement.name,
+                    date: newAchievement.date,
+                    description: newAchievement.description,
+                    updatedAt: new Date().toISOString()
+                    // userId dan createdAt tetap dipertahankan
+                };
+
+                await updateDoc(docRef, updateData);
+                
+                // Sukses: Reset form
+                resetFormState();
+                
+            } catch (e) {
+                console.error("Error memperbarui prestasi: ", e);
+                formError = `Gagal memperbarui: ${e.message || 'Kesalahan Server'}`;
+                render();
+            }
+        }
+
+        // --- Handler Firestore: Hapus Prestasi (DELETE) ---
+        function handleDeleteAchievement(id, name) {
+            // Memanggil modal konfirmasi kustom
+            showConfirmModal(
+                "Konfirmasi Hapus Data",
+                `Anda yakin ingin menghapus prestasi: "${name}"? Tindakan ini tidak dapat dibatalkan.`,
+                async () => {
+                    if (!db) return;
+                    try {
+                        // Path publik: /artifacts/{appId}/public/data/achievements/{id}
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'achievements', id);
+                        await deleteDoc(docRef);
+                        // Jika yang dihapus adalah yang sedang diedit, batalkan mode edit
+                        if (editingAchievementId === id) {
+                            resetFormState();
+                        } else {
+                            // Re-render akan dipicu oleh onSnapshot, tapi pastikan form error direset
+                            formError = '';
+                            render();
+                        }
+                    } catch (e) {
+                        console.error("Error menghapus prestasi: ", e);
+                        // Tampilkan error jika perlu, meskipun onSnapshot yang seharusnya handle
+                    }
+                }
+            );
+        }
+
+        // --- Setup Firebase & Firestore Listener ---
+        function setupFirebase() {
+            // FIX ERROR: INISIALISASI IKON SETELAH LUCIDE TERSEDIA
+            if (typeof lucide !== 'undefined') {
+                icons = {
+                    trophy: createIconWrapper(lucide.Trophy),
+                    loader: createIconWrapper(lucide.Loader),
+                    user: createIconWrapper(lucide.User),
+                    lock: createIconWrapper(lucide.Lock),
+                    logIn: createIconWrapper(lucide.LogIn),
+                    layoutDashboard: createIconWrapper(lucide.LayoutDashboard),
+                    userCheck: createIconWrapper(lucide.UserCheck),
+                    plusSquare: createIconWrapper(lucide.PlusSquare),
+                    save: createIconWrapper(lucide.Save),
+                    listTodo: createIconWrapper(lucide.ListTodo),
+                    award: createIconWrapper(lucide.Award),
+                    trash2: createIconWrapper(lucide.Trash2),
+                    clipboardX: createIconWrapper(lucide.ClipboardX),
+                    logOut: createIconWrapper(lucide.LogOut),
+                    edit3: createIconWrapper(lucide.Edit3), // Ikon Edit
+                    calendar: createIconWrapper(lucide.Calendar), // Ikon Kalender
+                    search: createIconWrapper(lucide.Search), // Ikon Search
+                    alertTriangle: createIconWrapper(lucide.AlertTriangle), // Ikon Error
+                    x: createIconWrapper(lucide.X), // Ikon Batal
+                };
+            } else {
+                console.error("Lucide library tidak dimuat atau tidak tersedia.");
+            }
+
+            if (!firebaseConfig) {
+                console.error("Firebase config tidak ditemukan atau gagal di-parse.");
+                isAuthReady = true;
+                render();
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (!user) {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (e) {
+                            console.error("Gagal melakukan autentikasi Firebase:", e);
+                        }
+                    }
+                    userId = auth.currentUser?.uid || 'anon-' + (typeof crypto !== 'undefined' ? crypto.randomUUID() : 'temp-id'); 
+                    isAuthReady = true;
+                    startDataListener(); // Mulai mendengarkan data setelah auth siap
+                    render();
+                });
+
+            } catch (e) {
+                console.error("Gagal inisialisasi Firebase:", e);
+                isAuthReady = true;
+                render();
+            }
+        }
+
+        // --- Firestore Realtime Listener ---
+        function startDataListener() {
+            if (!db || !userId) return;
+
+            // Mendengarkan koleksi Prestasi publik
+            const achievementsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'achievements');
+            const q = query(achievementsCollectionRef);
+
+            onSnapshot(q, (snapshot) => {
+                achievements = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                // Sort by date descending
+                achievements.sort((a, b) => new Date(b.date) - new Date(a.date));
+                
+                // Pastikan untuk merender ulang setelah data baru masuk
+                if (isAuthReady) {
+                    render();
+                }
+            }, (error) => {
+                console.error("Gagal mendengarkan data prestasi: ", error);
+            });
+        }
+
+        // Panggil setup saat DOM siap
+        window.onload = setupFirebase;
+
+        // Eksport handler ke window agar bisa dipanggil dari HTML
+        window.app = {
+            handleLogin,
+            handleLogout,
+            handleAddAchievement,
+            handleUpdateAchievement, // Handler baru untuk update
+            handleDeleteAchievement,
+            handleEditStart, // Handler baru untuk memulai mode edit
+            handleCancelEdit // Handler baru untuk membatalkan mode edit
+        };
+
+    </script>
+</body>
+</html>
